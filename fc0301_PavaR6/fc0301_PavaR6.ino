@@ -33,6 +33,7 @@
  */
 
 #include <avr/io.h>
+#include <util/delay.h>
 #include <avr/interrupt.h>
 #include <util/crc16.h>
 #include <SPI.h>
@@ -43,7 +44,7 @@
 #define BATTERYVOLTAGEPIN A0
 #define ASCII 7          // ASCII 7 or 8
 #define STOPBITS 2       // Either 1 or 2
-#define TXDELAY 30        // Delay between sentence TX's
+#define TXDELAY 20        // Delay between sentence TX's
 #define RTTY_BAUD 50     // Baud rate for use with RFM22B Max = 600
 #define RADIO_FREQUENCY 434.200
 
@@ -51,6 +52,7 @@ uint8_t buf[60];
 char txstring[80];
 volatile int txstatus=1;
 volatile int txstringlength=0;
+volatile double txwarmup_ms=10000; // milliseconds for transmitter to warmup with steady carrrier before sending data
 volatile char txc;
 volatile int txi;
 volatile int txj;
@@ -60,6 +62,7 @@ int navmode = 0, battv=0, rawbattv=0, GPSerror = 0, lat_int=0,lon_int=0,txnulls=
 int32_t lat = 0, lon = 0, alt = 0, maxalt = 0, lat_dec = 0, lon_dec =0, battvaverage=0;
 int battvsmooth[5] , a;
 boolean firstlock=1;
+
 
 rfm22 radio1(RFM22B_PIN);
 
@@ -75,10 +78,7 @@ void setup() {
 
 void loop()
 {
-  gps_check_nav();
-  if(navmode != 6) {
-    gps_set_airborne();
-  }
+
 
 
   //  if((lock==3) && (firstlock==1))
@@ -87,12 +87,27 @@ void loop()
   //firstlock=0;
   //rtty_txstring("PSM ENGAGED PSM ENGAGED\n");
   //}
-  prepare_data();
+  
+  if (15 == txstatus) {  //It's time to transmit telemetry
+  	gps_check_nav();
+ 	 if(navmode != 6) {
+   		 gps_set_airborne();
+  	 }
+    prepare_data();
   if(alt>maxalt)
   {
     maxalt=alt;
   }
-}    
+  	//Warm up radio transmitter
+  	radio1.write(0x07, 0x08);//begin transmit carrier
+  	delay(10000);
+  	txstatus=2;
+  }
+  if (20 == txstatus)  {  //Radio shutdown
+  	radio1.write(0x07, 0x00);//Set radio to standby low power mode.
+  	txstatus=0;
+  }
+}   
 
 void setupGPS() {
   Serial.println("$PUBX,40,GLL,0,0,0,0*5C");
@@ -394,11 +409,11 @@ ISR(TIMER1_COMPA_vect)
     {
       maxalt=alt;
     }
-    sprintf(txstring, "UUUUU$$$$$K2VOL,%i,%02d:%02d:%02d,%s%i.%07ld,%s%i.%07ld,%ld,%d,%d,%i",count, hour, minute, second,lat < 0 ? "-" : "",lat_int,lat_dec,lon < 0 ? "-" : "",lon_int,lon_dec, maxalt,sats,lock,battvaverage);
+    sprintf(txstring, "$$$$$K2VOL,%i,%02d:%02d:%02d,%s%i.%07ld,%s%i.%07ld,%ld,%d,%d,%i",count, hour, minute, second,lat < 0 ? "-" : "",lat_int,lat_dec,lon < 0 ? "-" : "",lon_int,lon_dec, maxalt,sats,lock,battvaverage);
     sprintf(txstring, "%s*%04X\n", txstring, gps_CRC16_checksum(txstring));
     maxalt=0;
     txstringlength=strlen(txstring);
-    txstatus=2;
+    txstatus=15;
     txj=0;
     break;
   case 2: // Grab a char and lets go transmit it. 
@@ -412,7 +427,7 @@ ISR(TIMER1_COMPA_vect)
     }
     else 
     {
-      txstatus=0; // Should be finished
+      txstatus=20; // Should be finished, shut off radio
       txj=0;
       count++;
     }
@@ -445,6 +460,11 @@ ISR(TIMER1_COMPA_vect)
       txstatus=2;
       break;
     }
+  case 15:  //warming up radio, do nothing, this will be taken of outside of ISR
+  		break;
+  case 20:  //shut down radio taken care of outside of ISR.  
+  		//External function will set txstatus=0;
+  	break;
 
   }
 }
@@ -473,8 +493,10 @@ void setupRadio(){
   radio1.write(0x0c,0x15);
   radio1.setFrequency(RADIO_FREQUENCY);
   radio1.write(0x6D, 0x04);// turn tx low power 11db
-  //radio1.write(0x07, 0x00 //Enter Sleep Mode
   radio1.write(0x07, 0x08);//begin transmit carrier
+  delay(1000);
+  radio1.write(0x07, 0x00); //Enter Sleep Mode
+  //radio1.write(0x07, 0x08);//begin transmit carrier
 }
 
 void setupGPSpower() {
